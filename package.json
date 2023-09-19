@@ -4,8 +4,6 @@
   "description": "",
   "main": "bin/index.js",
   "scripts": {
-    "deploy": "node deploy.config.js",
-    "aaa": "node  test/index.js --location=global",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
