@@ -1,37 +1,43 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const childProcess = require('child_process');
-const lineLog = require('single-line-log').stdout;
 const { Client } = require("ssh2");
 const archiver = require('archiver');
 const ora = require('ora');
+const chalk = require('chalk')
+
+const {validator,question} = require("../lib/index")
 
 const conn = new Client();
 const projectDir = process.cwd();
 
-const log = {
-    success: (...msg) => {
-        console.log('\x1B[32m', '✔', ...msg)
-    },
-    error: (...msg) => {
-        console.log('\x1B[31m', '✗', ...msg)
-    },
-    info: (...msg) => {
-        console.log('\x1B[37m', ' ', ...msg)
-    }
+
+
+//连接服务器
+const connect = (params) => {
+    return new Promise((resolve, reject) => {
+        conn.on("ready", async () => {
+            resolve()
+        }).on("error",(error) => {
+            reject("服务器连接失败，请检查登录配置",error);
+        }).connect(params);
+    })
 }
 
-//执行打包程序
+//执行打包
 const build = async (script) => {
-    try {
-        childProcess.execSync(script, { cwd: projectDir });
-        // spinner.stop();
-    } catch (err) {
-        log.error(err);
-        process.exit(1);
-    }
+    return new Promise((resolve, reject) => {
+        try {
+            childProcess.execSync(script, { cwd: projectDir });
+            resolve()
+        } catch (err) {
+            reject(err)
+        }
+    })
+    
 }
 
+//压缩打包文件夹
 const zip = async (zipDir, zipName) => {
     return new Promise((resolve, reject)=>{
         let output = fs.createWriteStream(projectDir+'/'+zipName) // 创建⽂件写⼊流
@@ -39,7 +45,7 @@ const zip = async (zipDir, zipName) => {
         output.on('close', () => {
             resolve()
         }).on('error', (err) => {
-            reject()
+            reject(err)
         })
         archive.pipe(output)
         archive.directory(zipDir, false)
@@ -47,6 +53,7 @@ const zip = async (zipDir, zipName) => {
     })
 }
 
+//执行命令行
 const runcmd = (cmd) => {
     return new Promise((resolve, reject)=>{
         conn.exec(cmd,(err, stream) => {
@@ -62,12 +69,13 @@ const runcmd = (cmd) => {
             }).on('data', function(data){
                 
             }).stderr.on('data', function(data) {
-                console.log("data2",data.toString())
+                reject(data.toString())
             });
         })
     })
 }
 
+//上传文件
 const upload = (distPath,webPath) => {
     return new Promise((resolve, reject)=>{
         conn.sftp((err, sftp) => {
@@ -84,39 +92,64 @@ const upload = (distPath,webPath) => {
 
 
 exports.deploy = async (config) => {
-    if(config && config.script){
-        
-        const spinner = ora('执行打包中...').start();
-        build(config.script);
-        spinner.succeed("打包完成")
+    let spinner;
+    try {
+        //验证参数
+        config = await validator(config);
+
+        //判断是否需要填写密码交互
+        if(config.inquirer){
+            config = await question(config)
+        }
+
+        //执行打包程序
+        spinner = ora().start("执行打包中...");
+        await build(config.script);
+        spinner.succeed("打包完成");
+
+        //压缩文件夹
         spinner.start("开始压缩zip包")
         const distPath = projectDir+'/'+config.distDir;
         const distName = config.distDir+'.zip';
         await zip(distPath, distName);
         spinner.succeed("压缩完成")
+
+
+        //连接服务器
         spinner.start("连接服务器")
-        conn.on("ready", async () => {
-            try {
-                spinner.succeed("连接服务器成功")
-                spinner.start("上传zip压缩包")
-                if(config.clearWebDir){
-                    await runcmd("cd "+config.webPath);
-                    await runcmd("rm -rf "+config.webPath+"/*");
-                }
-                await upload(projectDir+'/'+distName,config.webPath+'/'+distName);
-                spinner.succeed("上传压缩包成功")
-                spinner.start("正在解压缩zip包")
-                await runcmd("cd " + config.webPath);
-                await runcmd("unzip -q -o " + config.webPath+"/"+distName + " -d "+config.webPath);
-                await runcmd("rm -rf "+config.webPath+'/'+distName);
-                spinner.succeed("压缩包解压成功")
-                spinner.succeed("本次操作完成")
-                spinner.stop();
-                conn.end();
-            } catch (error) {
-                console.fail(error ? error : "操作失败！")
-                conn.end();
-            }
-        }).connect(config);
+        await connect(config);
+        spinner.succeed("连接服务器成功")
+
+        //上传文件
+        spinner.start("上传文件")
+        if(config.clearWebDir){
+            //如果需要清空目录执行
+            await runcmd("cd "+config.webPath);
+            await runcmd("rm -rf "+config.webPath+"/*");
+        }
+        await upload(projectDir+'/'+distName,config.webPath+'/'+distName);
+        spinner.succeed("上传压缩包成功")
+
+        //解压并覆盖
+        spinner.start("正在解压文件")
+        await runcmd("cd " + config.webPath);
+        await runcmd("unzip -q -o " + config.webPath+"/"+distName + " -d "+config.webPath);
+        await runcmd("rm -rf "+config.webPath+'/'+distName);
+        spinner.succeed("文件解压成功")
+
+        //完成 
+        spinner.succeed("本次操作完成")
+        spinner.stop();
+        conn.end();
+
+    } catch (error) {
+        error = typeof error === 'string' ? error : "执行失败"
+        console.log(chalk.red(error))
+        if(spinner){
+            spinner.stop();
+        }
+        conn.end();
+        process.exit(1);
     }
+
 }
